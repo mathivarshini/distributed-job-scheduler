@@ -1,0 +1,354 @@
+// Core database models for the distributed job scheduling platform.
+// Phase 3A: foundational entities only.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum QueueStatus {
+  ACTIVE
+  PAUSED
+  DISABLED
+}
+
+enum RetryStrategy {
+  FIXED_DELAY
+  LINEAR_BACKOFF
+  EXPONENTIAL_BACKOFF
+}
+
+enum JobPriority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum JobStatus {
+  QUEUED
+  SCHEDULED
+  CLAIMED
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+  DEAD_LETTER
+}
+
+enum WorkerStatus {
+  STARTING
+  IDLE
+  BUSY
+  PAUSED
+  STOPPING
+  OFFLINE
+}
+
+enum ExecutionStatus {
+  CLAIMED
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+  CANCELLED
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+model User {
+  id              String                @id @default(uuid()) @db.Uuid
+  email           String                @unique @db.VarChar(255)
+  name            String                @db.VarChar(255)
+  passwordHash    String                @db.VarChar(255)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  ownedOrganizations Organization[]       @relation("OrganizationOwner")
+  organizationMembers OrganizationMember[]
+  createdProjects Project[]             @relation("ProjectCreator")
+
+  @@index([email])
+}
+
+model Organization {
+  id            String                @id @default(uuid()) @db.Uuid
+  name          String                @db.VarChar(255)
+  slug          String                @unique @db.VarChar(255)
+  ownerId       String                @db.Uuid
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  // Restrict prevents deleting an owner account while the organization still exists.
+  owner         User                  @relation("OrganizationOwner", fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  members       OrganizationMember[]
+  projects      Project[]
+
+  @@index([ownerId])
+  @@index([slug])
+}
+
+model OrganizationMember {
+  id              String          @id @default(uuid()) @db.Uuid
+  organizationId  String          @db.Uuid
+  userId          String          @db.Uuid
+  role            MemberRole      @default(MEMBER)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Cascade removes membership rows if the organization is deleted.
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  // Cascade removes membership rows if the user account is deleted.
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId, role])
+  @@index([userId, organizationId])
+}
+
+model Project {
+  id              String          @id @default(uuid()) @db.Uuid
+  organizationId  String          @db.Uuid
+  createdById     String?         @db.Uuid
+  name            String          @db.VarChar(255)
+  description     String?         @db.Text
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Cascade keeps projects aligned with the parent organization lifecycle.
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  // SetNull preserves the project record if the creator account is removed.
+  createdBy       User?           @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  queues          Queue[]
+
+  @@index([organizationId])
+  @@index([createdById])
+  @@index([organizationId, name])
+}
+
+model RetryPolicy {
+  id                String          @id @default(uuid()) @db.Uuid
+  name              String          @db.VarChar(255)
+  strategy          RetryStrategy   @default(FIXED_DELAY)
+  maxAttempts       Int             @default(3)
+  initialDelayMs    Int             @default(1000)
+  maxDelayMs        Int             @default(30000)
+  backoffMultiplier Float           @default(2.0)
+  jitterMs          Int?            @db.Integer
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  queues            Queue[]
+
+  @@index([isActive, strategy])
+  @@index([name])
+}
+
+model Queue {
+  id                  String          @id @default(uuid()) @db.Uuid
+  projectId           String          @db.Uuid
+  retryPolicyId       String?         @db.Uuid
+  name                String          @db.VarChar(255)
+  description         String?         @db.Text
+  status              QueueStatus     @default(ACTIVE)
+  priority            JobPriority     @default(NORMAL)
+  maxConcurrency      Int             @default(1)
+  isPaused            Boolean         @default(false)
+  statsPending        Int             @default(0)
+  statsProcessing     Int             @default(0)
+  statsCompleted      Int             @default(0)
+  statsFailed         Int             @default(0)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  // Cascade keeps queue data aligned with the owning project lifecycle.
+  project             Project         @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  // SetNull allows the queue to remain defined if the retry policy is removed.
+  retryPolicy         RetryPolicy?    @relation(fields: [retryPolicyId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  jobs                Job[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+  @@index([status])
+  @@index([priority])
+  @@index([projectId, status])
+  @@index([projectId, priority])
+}
+
+model Job {
+  id                String          @id @default(uuid()) @db.Uuid
+  queueId           String          @db.Uuid
+  name              String          @db.VarChar(255)
+  payload           Json
+  metadata          Json
+  priority          JobPriority     @default(NORMAL)
+  status            JobStatus       @default(QUEUED)
+  currentAttempt    Int             @default(0)
+  maxAttempts       Int             @default(3)
+  scheduledFor      DateTime?       @db.Timestamp(6)
+  delayMs           Int             @default(0)
+  cronExpression    String?         @db.VarChar(255)
+  batchId           String?         @db.VarChar(255)
+  idempotencyKey    String?         @unique @db.VarChar(255)
+  timeoutMs         Int             @default(30000)
+  workerId          String?         @db.VarChar(255)
+  lastError         String?         @db.Text
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  claimedAt         DateTime?       @db.Timestamp(6)
+  startedAt         DateTime?       @db.Timestamp(6)
+  completedAt       DateTime?       @db.Timestamp(6)
+  failedAt          DateTime?       @db.Timestamp(6)
+
+  // Cascade removes dependent jobs if the queue is deleted.
+  queue             Queue           @relation(fields: [queueId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  scheduledJob      ScheduledJob?
+  deadLetterQueue   DeadLetterQueue?
+  executions        JobExecution[]
+
+  @@index([queueId])
+  @@index([status])
+  @@index([priority])
+  @@index([scheduledFor])
+  @@index([createdAt])
+  @@index([cronExpression])
+  @@index([batchId])
+  @@index([queueId, status])
+  @@index([queueId, priority, status])
+}
+
+model Worker {
+  id                  String              @id @default(uuid()) @db.Uuid
+  name                String              @db.VarChar(255)
+  hostname            String              @db.VarChar(255)
+  processId           Int                 @db.Integer
+  version             String              @db.VarChar(64)
+  status              WorkerStatus        @default(STARTING)
+  maxConcurrency      Int                 @default(1)
+  currentRunningJobs  Int                 @default(0)
+  totalJobsProcessed  Int                 @default(0)
+  totalSuccessCount   Int                 @default(0)
+  totalFailureCount   Int                 @default(0)
+  lastHeartbeatAt     DateTime?           @db.Timestamp(6)
+  registeredAt        DateTime            @default(now())
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  heartbeats          WorkerHeartbeat[]
+  executions          JobExecution[]
+
+  @@index([status])
+  @@index([lastHeartbeatAt])
+  @@index([hostname])
+  @@index([name])
+}
+
+model WorkerHeartbeat {
+  id              String          @id @default(uuid()) @db.Uuid
+  workerId        String          @db.Uuid
+  heartbeatAt     DateTime        @default(now()) @db.Timestamp(6)
+  cpuUsage        Float?          @db.Real
+  memoryUsage     Float?          @db.Real
+  activeJobs      Int             @default(0)
+  queueName       String?         @db.VarChar(255)
+  createdAt       DateTime        @default(now())
+
+  worker          Worker          @relation(fields: [workerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([workerId])
+  @@index([heartbeatAt])
+  @@index([workerId, heartbeatAt])
+}
+
+model JobExecution {
+  id                String            @id @default(uuid()) @db.Uuid
+  jobId             String            @db.Uuid
+  workerId          String?           @db.Uuid
+  attemptNumber     Int               @default(1)
+  executionStatus   ExecutionStatus   @default(CLAIMED)
+  startedAt         DateTime?         @db.Timestamp(6)
+  completedAt       DateTime?         @db.Timestamp(6)
+  durationMs        Int?              @db.Integer
+  exitCode          Int?              @db.Integer
+  failureReason     String?           @db.Text
+  retryScheduledAt  DateTime?         @db.Timestamp(6)
+  createdAt         DateTime          @default(now())
+
+  job               Job               @relation(fields: [jobId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  worker            Worker?           @relation(fields: [workerId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  logs              JobLog[]
+
+  @@index([jobId])
+  @@index([workerId])
+  @@index([executionStatus])
+  @@index([startedAt])
+  @@index([completedAt])
+  @@index([jobId, executionStatus])
+  @@index([jobId, attemptNumber])
+}
+
+model JobLog {
+  id            String      @id @default(uuid()) @db.Uuid
+  executionId   String      @db.Uuid
+  level         LogLevel    @default(INFO)
+  message       String      @db.Text
+  metadata      Json
+  timestamp     DateTime    @default(now()) @db.Timestamp(6)
+
+  execution     JobExecution @relation(fields: [executionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([executionId])
+  @@index([level])
+  @@index([timestamp])
+}
+
+model ScheduledJob {
+  id                String          @id @default(uuid()) @db.Uuid
+  jobId             String          @unique @db.Uuid
+  nextRunAt         DateTime?       @db.Timestamp(6)
+  cronExpression    String?         @db.VarChar(255)
+  isRecurring       Boolean         @default(false)
+  lastRunAt         DateTime?       @db.Timestamp(6)
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  // Cascade removes scheduled metadata when the job is deleted.
+  job               Job             @relation(fields: [jobId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([nextRunAt])
+  @@index([isActive, nextRunAt])
+  @@index([cronExpression])
+}
+
+model DeadLetterQueue {
+  id                String          @id @default(uuid()) @db.Uuid
+  jobId             String          @unique @db.Uuid
+  failureReason     String          @db.Text
+  failureCount      Int             @default(1)
+  movedToDlqAt      DateTime        @default(now())
+  lastError         String?         @db.Text
+  retryAllowed      Boolean         @default(false)
+  createdAt         DateTime        @default(now())
+
+  // Cascade removes the DLQ entry if the originating job is deleted.
+  job               Job             @relation(fields: [jobId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([movedToDlqAt])
+  @@index([retryAllowed, movedToDlqAt])
+}
