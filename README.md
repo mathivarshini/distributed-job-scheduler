@@ -1,3 +1,43 @@
+# Production-Inspired Distributed Job Scheduling Platform
+
+## Overview
+
+A production-inspired distributed job scheduling platform capable of executing asynchronous background jobs across multiple worker instances.
+
+## Tech Stack
+
+- Node.js
+- Express
+- TypeScript
+- PostgreSQL
+- Prisma ORM
+- React
+- Vite
+- JWT Authentication
+- Docker
+
+## Features
+
+- Authentication
+- Organization & Project Management
+- Queue Management
+- Job Scheduling
+- Worker Service
+- Retry Policies
+- Dead Letter Queue
+- Dashboard APIs
+- Logging
+- Heartbeats
+- Graceful Shutdown
+
+## Setup
+
+```bash
+npm install
+docker compose up
+npx prisma migrate deploy
+npm run dev
+
 # Distributed Job Scheduling Platform
 
 A production-inspired distributed job scheduling platform with separate backend, worker, frontend, database, and documentation layers.
